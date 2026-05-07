@@ -24,14 +24,6 @@ const int PIEZO_PIN = 4;
 Servo servoIn; 
 Servo servoOut;
 
-// 피에조 변수
-int inMelodyIndex = 0;
-unsigned long inMelodyTime = 0;
-bool inMelodyPlaying = false;
-int outMelodyIndex = 0;
-unsigned long outMelodyTime = 0;
-bool outMelodyPlaying = false;
-
 const int inMelody[] = { 
   262, 330, 392, 523
 };
@@ -60,12 +52,23 @@ ThreeWire myWire(RTC_DAT, RTC_CLK, RTC_RST);
 RtcDS1302<ThreeWire> Rtc(myWire);
 
 // 감지 설정
-const int DETECT_DISTANCE = 10;                   // 10cm 이하 감지
+const int DETECT_DISTANCE = 10;                   // 7cm 이하 감지
 const unsigned long DETECT_TIME = 1000;          // 1초 이상 감지
 const unsigned long STOP_TIME = 1000;            // STOP 1초 표시
 const unsigned long OPEN_SHOW_TIME = 1500;       // OPEN 최소 표시 시간
 const unsigned long RESULT_SHOW_TIME = 5000;     // 결과 5초 표시
 const unsigned long WRONG_SHOW_TIME = 2000;      // 잘못된 방향 2초 표시
+
+int melodyIndex = 0; //소리 출력 인덱스(크기: 4) 
+unsigned long lastToneTime = 0; // ()
+
+unsigned long inPreviousMillis = 0; // 
+unsigned long outPreviousMillis = 0;
+const long interval = 1;
+int inAngle = 0;
+int outAngle = 180;
+
+bool remoteControlFlag = false;
 
 // =====================================================
 // 전체 상태 관리
@@ -79,7 +82,12 @@ enum SystemState {
   PARKED,
   EXIT_SENSOR1_DETECTED,
   WRONG_EXIT_ORDER,
-  SHOW_RESULT
+  EXIT_OPEN,
+  SHOW_RESULT,
+  REMOTE_MOTOR_IN_OPEN,
+  REMOTE_MOTOR_IN_CLOSE,
+  REMOTE_MOTOR_OUT_OPEN,
+  REMOTE_MOTOR_OUT_CLOSE
 };
 
 SystemState state = READY;
@@ -91,28 +99,22 @@ unsigned long stateStartMillis = 0;
 
 // 센서 상태
 double sensor1Distance = -1;
-// 입차 센서가 측정한 물체와의 거리.
 double sensor2Distance = -1;
-// 출차 센서가 측정한 물체와의 거리.
+
 bool sensor1Detected = false;
-// 입차 센서와 물체와의 거리가 특정 거리이하인가? 
 bool sensor2Detected = false;
-// 출차 센서와 물체와의 거리가 특정 거리이하인가? 
 bool anyDetected = false;
-// 입 or 출차 센서와 물체와의 거리가 특정 거리이하인가? 
 
 // 입차/출차 시간
 RtcDateTime enterTime;
 RtcDateTime exitTime;
 
 bool hasEnterTime = false;
-// ??
-
 
 // 입차 감지 시작 시간
 unsigned long entryDetectStartMillis = 0;
 
-// 주차 결과 (각각 주차장 이용시간: (exitTime - enterTime)/ 요금료)
+// 주차 결과
 unsigned long parkingSeconds = 0;
 unsigned long parkingFee = 0;
 
@@ -138,8 +140,6 @@ double readDistanceCM(int trigPin, int echoPin) {
   return duration * 0.0343 / 2;
 }
 
-// 초음파 센서와 물체와의 거리를 계산하는 하뭇
-
 void updateSensors() {
   sensor1Distance = readDistanceCM(TRIG1, ECHO1);
   delay(50);
@@ -152,7 +152,7 @@ void updateSensors() {
 
   anyDetected = sensor1Detected || sensor2Detected;
 }
-// 알고리즘의 핵심 함수로 입/출차 센서가 물체를 감지하였는지를 확인하는 코드 (ex: 입차센서가 물체를 감지하면 sensor1Detected = True)
+
 
 // =====================================================
 // LCD 출력
@@ -191,8 +191,6 @@ void lcdPrintDuration(unsigned long totalSeconds) {
   lcd.print(seconds);
 }
 
-// 위 함수들은 LCD에 시간 출력 형식을 지정하는 함수. 
-
 void showReady() {
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -201,26 +199,23 @@ void showReady() {
   lcd.setCursor(0, 1);
   lcd.print("Wait Car");
 }
-// Ready상태에서 동작하는 함수로, Ready/ Wait Car를 LCD에 출력한다.
+
 void showStop() {
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("STOP");
 }
-// Stop상태에서 동작하는 함수로, Ready/ Wait Car를 LCD에 출력한다.
 
 void showOpen() {
   lcd.clear();
 
   lcd.setCursor(0, 0);
-  lcd.print("Time: ");
+  lcd.print("Time ");
   lcdPrintTime(enterTime);
 
   lcd.setCursor(0, 1);
   lcd.print("OPEN");
 }
-// Open상태에서 동작하는 함수로, Time/ Wait Car를 LCD에 출력한다. 
- 
 
 void showParked() {
   lcd.clear();
@@ -231,7 +226,6 @@ void showParked() {
   lcd.setCursor(0, 1);
   lcd.print("Wait Exit");
 }
-// 물체가 입차센서를 완전히 통과하면 Parked: PARKED/Wait Exit 출력.
 
 void showWrongExitOrder() {
   lcd.clear();
@@ -242,8 +236,6 @@ void showWrongExitOrder() {
   lcd.setCursor(0, 1);
   lcd.print("S1 -> S2");
 }
-
-// ()
 
 void showParkingResult() {
   lcd.clear();
@@ -258,7 +250,6 @@ void showParkingResult() {
   lcd.print("W");
 }
 
-// 출차센서에 감지되면 exittime을 설정하고, 주차 시간 및 요금을 출력한다.
 
 // =====================================================
 // RTC 시간 처리
@@ -351,7 +342,6 @@ void changeState(SystemState nextState) {
   switch (state) {
     case READY:
       showReady();
-      // Ready출력
       Serial.println("STATE: READY");
       break;
 
@@ -361,19 +351,17 @@ void changeState(SystemState nextState) {
 
     case SHOW_STOP:
       showStop();
-      // Stop출력
       Serial.println("STATE: SHOW_STOP");
       break;
 
     case SHOW_OPEN:
       showOpen();
-      // 현재 시간 및 Open출력
       Serial.println("STATE: SHOW_OPEN");
       break;
 
     case PARKED:
+      noTone(PIEZO_PIN);
       showParked();
-      // Parked 및 Wait exit출력
       Serial.println("STATE: PARKED");
       break;
 
@@ -387,11 +375,12 @@ void changeState(SystemState nextState) {
       break;
 
     case SHOW_RESULT:
-    
-      piezoOut();
       showParkingResult();
-      // 주차 시간 및 요금 출력.
       Serial.println("STATE: SHOW_RESULT");
+      break;
+    
+    case EXIT_OPEN:
+      Serial.println("STATE: EXIT_OPEN");
       break;
   }
 }
@@ -407,7 +396,7 @@ void handleReady() {
     changeState(ENTRY_DETECTING);
   }
 }
-// loop에서 Ready상태일 때, 실행할 함수. 입/출차 센서에 물체가 감지되면 ENTRY_DETECTING으로 상태가 변한다.
+
 void handleEntryDetecting() {
   if (!anyDetected) {
     changeState(READY);
@@ -425,13 +414,13 @@ void handleEntryDetecting() {
     changeState(SHOW_STOP);
   }
 }
-// loop에서 ENTRY_DETECTING상태일 때, 실행할 함수. 만일 아무것도 감지가 안되면 READY로 돌아가고, 감지된 상태면 hasEntertime (입차 기록)이 true가 된다. 그리고 입차시각을 enterTime에 저장.
+
 void handleShowStop() {
   if (millis() - stateStartMillis >= STOP_TIME) {
     changeState(SHOW_OPEN);
   }
 }
-// loop에서 STOP상태일 때, 실행할 함수. 특정 시간(STOP_TIME)동안 STOP상태가 지속되고, 이후에는 OPEN으로 상태를 바꾼다.
+
 void handleShowOpen() {
   // OPEN 화면을 최소 시간 동안 보여줌
   if (millis() - stateStartMillis < OPEN_SHOW_TIME) {
@@ -443,29 +432,27 @@ void handleShowOpen() {
     changeState(PARKED);
   }
 }
-// loop에서 OPEN상태일 때, 실행할 함수. 센서가 완전히 비워질 때까지 OPEN유지. 비워지면 PARKED로 전환.
+
 
 // =====================================================
 // 출차 처리
 // =====================================================
 
 void handleParked() {
-  // 정상 출차 시작:
-  // 센서1이 감지되면 센서2가 같이 감지되어도 정상 순서 시작으로 인정
-  if (sensor2Detected) {
+  if (sensor1Detected) {
+    changeState(WRONG_EXIT_ORDER);
+    return;
+  }
+
+  if (!sensor1Detected && sensor2Detected) {
     changeState(EXIT_SENSOR1_DETECTED);
     return;
   }
-// loop에서 PARKED상태일 때, 실행할 함수. 출차 센서에 감지되면 EXIT_SENSOR1_DETECTED로 전환.
-
-  // 잘못된 순서:
-  // 센서1은 전혀 안 잡히고 센서2만 먼저 잡힌 경우
-  
 }
 
 void handleExitSensor1Detected() {
   // 센서1 이후 센서2가 감지되면 출차 처리
-  if (sensor2Detected) {
+  if (sensor2Detected && millis() - stateStartMillis > 200) {
     exitTime = getCurrentTime();
 
     parkingSeconds = getTimeDifferenceSeconds(enterTime, exitTime);
@@ -488,9 +475,7 @@ void handleExitSensor1Detected() {
     return;
   }
 }
-// loop에서 EXIT_SENSOR1_DETECTED상태일 때, 실행할 함수. exitTime에 출차시각 저장하고, 주차 시간 및 요금 계산 hasEnterTime은 false로 변화 기록. 그리고 SHOW_RESULT로 전환.
 
-// 나갈 때는 물체가 나가지 않아도 소리가 멈추고 모터가 내려가는 이유는 EXIT_SENSOR1_DETECTED상태일 때, 모터와 부저가 작동하기 때문이다. 즉 위 함수가 끝나면 부저는 꺼진다. (이건 물체 감지 유무와는 상관이 없음.)
 void handleWrongExitOrder() {
   // 잘못된 방향 화면을 2초 이상 보여주고, 센서가 비워지면 다시 출차 대기 상태로 돌아감
   if (millis() - stateStartMillis >= WRONG_SHOW_TIME && !anyDetected) {
@@ -499,49 +484,133 @@ void handleWrongExitOrder() {
 }
 
 void handleShowResult() {
-  // 결과를 5초 보여주고, 센서가 비워지면 Ready로 복귀
-  if (millis() - stateStartMillis >= RESULT_SHOW_TIME && !anyDetected) {
+  // 결과를 5초 보여주고, 모터 동작
+  if (millis() - stateStartMillis >= RESULT_SHOW_TIME) {
+    changeState(EXIT_OPEN);
+  }
+}
+
+void handleExitOpen() {
+  if (!anyDetected) {
     changeState(READY);
   }
 }
-// loop에서 SHOW_RESULT상태일 때, 실행할 함수. 특정 시간(RESULT_SHOW_TIME) 이 지남 및 물체가 감지되지 않으면 다시 Ready로 상태를 전환한다. 즉 이 상태일때, outMotorOpen()를 실행하면 될 듯 하다.
 
-//In 부저 소리
-void piezoIn(){
-  int size = sizeof(inMelody) / sizeof(inMelody[0]);
-  for(int i = 0; i < size; i++){
-    TimerFreeTone(PIEZO_PIN, inMelody[i], 200);
+//부저
+void piezo(){
+  //state 가 SWHO_OPEN일 경우 입차할때 소리 울림
+  if (state == SHOW_OPEN) {
+    if (millis() - lastToneTime > 200) {
+      TimerFreeTone(PIEZO_PIN, inMelody[melodyIndex], 180);
+
+      melodyIndex++;
+      if (melodyIndex >= 4) melodyIndex = 0;
+
+      lastToneTime = millis();
+    }
+  } else if (state == EXIT_OPEN) { // 출차할 때 소리 울림
+    if (millis() - lastToneTime > 200) {
+      TimerFreeTone(PIEZO_PIN, outMelody[melodyIndex], 180);
+
+      melodyIndex++;
+      if (melodyIndex >= 4) melodyIndex = 0;
+
+      lastToneTime = millis();
+    }
+  }else { // 둘다 아니라면 인덱스 초기화
+    melodyIndex = 0;
   }
- 
 }
 
-//Out 부저 소리
-void piezoOut(){
-  int size = sizeof(outMelody) / sizeof(outMelody[0]);
-  for(int i = 0; i < size; i++){
-    TimerFreeTone(PIEZO_PIN, outMelody[i], 200);
+//모터 컨트롤
+void motorControl(){
+  unsigned long currentMillis = millis(); // 현재 시간 저장
+
+  // state가 입차 또는 리모컨 동작 시
+  if (state == SHOW_OPEN || state == REMOTE_MOTOR_IN_OPEN) { // in motor open (0 ~ 90)
+    if (currentMillis - inPreviousMillis >= interval) {
+      inPreviousMillis = currentMillis;
+
+      if (inAngle < 90) {
+        inAngle +=3;   // 한 단계씩 이동
+        servoIn.write(inAngle);
+      }
+    }
+  } 
+  if (state == PARKED || state == REMOTE_MOTOR_IN_CLOSE) { // in motor close (90 ~ 0)
+    if (currentMillis - inPreviousMillis >= interval) {
+      inPreviousMillis = currentMillis;
+
+      if (inAngle > 0) {
+        inAngle-=3;   // 한 단계씩 이동
+        servoIn.write(inAngle);
+      }
+    }
+  } 
+  if (state == EXIT_OPEN || state == REMOTE_MOTOR_OUT_OPEN) { // out motor open (90 ~ 180)
+    if (currentMillis - outPreviousMillis >= interval) {
+      outPreviousMillis = currentMillis;
+
+      if (outAngle < 180) {
+        outAngle+=3;   // 한 단계씩 이동
+        servoOut.write(outAngle);
+      }
+    }
+  } 
+  if (state == READY || state == REMOTE_MOTOR_OUT_CLOSE) { // out motor close (180 ~ 90)
+    if (currentMillis - outPreviousMillis >= interval) {
+      outPreviousMillis = currentMillis;
+
+      if (outAngle > 90) {
+        outAngle-=3;   // 한 단계씩 이동
+        servoOut.write(outAngle);
+      }
+    }
   }
 }
 
-//In 모터
-void inMotorOpen(){
-    servoIn.write(90); 
-    piezoIn();
-}
 
-void inMotorClose(){
-  servoIn.write(0);
+//IR 리시버 센서
+void IrReceiverSensor(){
+  if (IrReceiver.decode()) {  // 적외선 센서의 수신값 해석
+    uint8_t cmd = IrReceiver.decodedIRData.command;
+    //Serial.print("cmd: ");
+    //Serial.println(cmd);
+    if (!(IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT)) {
+      //수동 모드로 전환
+      //remoteControlFlag = true;
+      //state READY로 바꿔놓음
+      //state = READY;
+      //showReady();
 
-}
+      if (cmd == 12) { // 1번 in motor open
+        remoteControlFlag = true;
+        Serial.println("Action: In Motor");
+        state = REMOTE_MOTOR_IN_OPEN;
+      }else if (cmd == 24) { // 2번 in motor close
+        remoteControlFlag = true;
+        Serial.println("Action: Out Motor");
+        state = REMOTE_MOTOR_IN_CLOSE;
+      }else if (cmd == 94) {  // 3번 out motor open
+        remoteControlFlag = true;
+        Serial.println("IR: OUT OPEN");
+        state = REMOTE_MOTOR_OUT_OPEN;
+      }
+      else if (cmd == 8) {  // 4번 out motor close
+        remoteControlFlag = true;
+        Serial.println("IR: OUT CLOSE");
+        state = REMOTE_MOTOR_OUT_CLOSE;
+      }else if(cmd == 22){  // 0번 리모컨 컨트롤 해제
+        remoteControlFlag = false;
+        sensor1Detected = false;
+        sensor2Detected = false;
+        state = READY;
+        showReady();
+      }
+    }
 
-//Out 모터
-void outMotorOpen(){
-    servoOut.write(90); 
-    piezoOut();
-}
-
-void outMotorClose(){
-  servoOut.write(180);
+    IrReceiver.resume();
+  }
 }
 
 
@@ -581,44 +650,49 @@ void setup() {
 
 void loop() {
   updateSensors();
+  IrReceiverSensor();
+  motorControl();
+  printDebugSensor();
+  if(!remoteControlFlag){
+    switch (state) {
+      case READY:
+        handleReady();
+        break;
 
-  switch (state) {
-    case READY:
-      outMotorClose();
-      handleReady();
-      break;
+      case ENTRY_DETECTING:
+        handleEntryDetecting();
+        break;
 
-    case ENTRY_DETECTING:
-      handleEntryDetecting();
-      break;
+      case SHOW_STOP:
+        handleShowStop();
+        break;
 
-    case SHOW_STOP:
-      handleShowStop();
-      break;
+      case SHOW_OPEN:
+        handleShowOpen();
+        
+        break;
 
-    case SHOW_OPEN:
-      handleShowOpen();
-      inMotorOpen();
-      break;
+      case PARKED:
+        handleParked();
+        break;
 
-    case PARKED:
-      noTone(PIEZO_PIN);
-      handleParked();
-      inMotorClose();
-      break;
+      case EXIT_SENSOR1_DETECTED:
+        handleExitSensor1Detected();
+        break;
 
-    case EXIT_SENSOR1_DETECTED:
-      handleExitSensor1Detected();
-      
-      break;
+      case WRONG_EXIT_ORDER:
+        handleWrongExitOrder();
+        break;
 
-    case WRONG_EXIT_ORDER:
-      handleWrongExitOrder();
-      break;
+      case SHOW_RESULT:
+        handleShowResult();
+        break;
 
-    case SHOW_RESULT:
-      outMotorOpen();
-      handleShowResult();
-      break;
+      case EXIT_OPEN:
+        handleExitOpen();
+        break;
+    }
   }
+
+  piezo();
 }
